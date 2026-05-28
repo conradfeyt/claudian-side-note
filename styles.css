@@ -1,0 +1,520 @@
+/* Claudian SideNote — Stage 2.1 polish styles
+ * Inspiration: clean modern comments panel (no bordered boxes, hairline separators,
+ * avatar + bold name + relative timestamp).
+ */
+
+.claudian-sidenote-panel {
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-normal);
+}
+
+/* Header ---------------------------------------------------------------- */
+
+.csn-header {
+  padding: 16px 16px 0 16px;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.csn-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.csn-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-normal);
+  letter-spacing: -0.01em;
+}
+
+.csn-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.csn-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.csn-icon-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.csn-icon-btn .svg-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Tabs ------------------------------------------------------------------ */
+
+.csn-tab-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-bottom: -1px;       /* overlap the header bottom border for active-underline effect */
+}
+
+.csn-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 4px 10px 4px;
+  margin-right: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.1s ease, border-color 0.1s ease;
+  user-select: none;
+}
+
+.csn-tab:hover {
+  color: var(--text-normal);
+}
+
+.csn-tab-active {
+  color: var(--text-accent);
+  border-bottom-color: var(--text-accent);
+}
+
+.csn-count-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  border-radius: 9px;
+}
+
+.csn-tab-active .csn-count-pill {
+  color: var(--text-on-accent, white);
+  background: var(--text-accent);
+}
+
+/* Body ------------------------------------------------------------------ */
+
+.csn-body {
+  padding: 0;
+  background: #FCFCFC;
+}
+
+.theme-dark .csn-body {
+  background: #1d1d1d;
+}
+
+.csn-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 32px 16px;
+  text-align: center;
+  margin: 0;
+}
+
+/* File groups (all-files scope) ----------------------------------------- */
+
+.csn-file-group {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.csn-file-group:last-child {
+  border-bottom: none;
+}
+
+.csn-file-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  cursor: pointer;
+  user-select: none;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.csn-file-group-header:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.csn-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.csn-chevron .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.csn-file-group.csn-collapsed .csn-chevron {
+  transform: rotate(-90deg);
+}
+
+.csn-file-group.csn-collapsed .csn-comment-list {
+  display: none;
+}
+
+.csn-file-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Comment list ---------------------------------------------------------- */
+
+.csn-comment-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.csn-comment {
+  position: relative;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  transition: background 0.1s ease;
+}
+
+.csn-comment:last-child {
+  border-bottom: none;
+}
+
+.csn-comment:hover {
+  background: var(--background-modifier-hover);
+}
+
+.csn-comment.csn-resolved {
+  opacity: 0.55;
+}
+
+/* Orphaned state is conveyed via the icon next to the author name — no left bar. */
+
+/* Message --------------------------------------------------------------- */
+
+.csn-message {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+}
+
+.csn-message:last-child {
+  margin-bottom: 0;
+}
+
+.csn-msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.csn-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  color: white;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.csn-msg-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.csn-msg-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.csn-msg-time {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.csn-msg-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.csn-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-muted);
+}
+
+.csn-status-icon .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.csn-status-orphan {
+  color: var(--text-error);
+}
+
+.csn-status-resolved {
+  color: var(--text-success);
+}
+
+/* Anchor quote (the highlighted snippet) -------------------------------- */
+
+.csn-anchor-quote {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-normal);
+  padding: 8px 10px 8px 12px;
+  border-left: 3px solid var(--text-accent);
+  background: var(--background-secondary);
+  border-radius: 0 4px 4px 0;
+  margin: 4px 0 10px 30px;         /* indent to align under the avatar */
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+/* Message body --------------------------------------------------------- */
+
+.csn-msg-body {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-normal);
+  margin-left: 30px;               /* indent under avatar */
+}
+
+/* Deleted file affordance --------------------------------------------- */
+
+.csn-file-group.csn-file-deleted .csn-file-name {
+  text-decoration: line-through;
+  color: var(--text-faint);
+}
+
+.csn-deleted-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-error, #d04848);
+  background: var(--background-modifier-error-rgb, rgba(208, 72, 72, 0.1));
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+.csn-deleted-remove {
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.csn-deleted-remove:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-error, #d04848);
+}
+
+/* Inline draft (new comment) ------------------------------------------ */
+
+.csn-draft {
+  margin: 12px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.csn-draft-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.csn-draft-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.csn-draft-file {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}
+
+.csn-draft-quote {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  border-left: 3px solid var(--text-accent);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 0 4px 4px 0;
+  max-height: 80px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.csn-draft-input {
+  width: 100%;
+  min-height: 60px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.csn-draft-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.csn-draft-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.csn-draft-cancel,
+.csn-draft-save {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.csn-draft-cancel:hover {
+  background: var(--background-modifier-hover);
+}
+
+.csn-draft-save.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.csn-draft-save.mod-cta:hover {
+  background: var(--interactive-accent-hover);
+}
+
+/* Editor highlights ---------------------------------------------------- */
+
+.csn-highlight {
+  border-radius: 2px;
+  cursor: pointer;
+  transition: filter 0.1s ease, outline 0.1s ease;
+}
+
+.csn-highlight:hover {
+  filter: brightness(0.92);
+  outline: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.theme-dark .csn-highlight:hover {
+  filter: brightness(1.15);
+  outline: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* Reply affordance ----------------------------------------------------- */
+
+.csn-reply-row {
+  margin-top: 10px;
+  margin-left: 30px;
+}
+
+.csn-reply-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+}
+
+.csn-reply-link:hover {
+  color: var(--text-accent);
+}
+
+.csn-reply-link .svg-icon {
+  width: 14px;
+  height: 14px;
+}

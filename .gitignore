@@ -1,0 +1,13 @@
+# Runtime comment data — user content, never commit
+data.json
+
+# Obsidian itself stores hot-reload state here
+.hotreload
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Node tooling (in case we add a build step later)
+node_modules/
+*.log

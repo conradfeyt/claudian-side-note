@@ -1,0 +1,9 @@
+{
+  "id": "claudian-side-note",
+  "name": "Claudian SideNote",
+  "version": "0.1.0",
+  "minAppVersion": "0.15.0",
+  "description": "Threaded inline comments anchored to text. A SideNote replacement with conversation threads (Conrad + Claudian).",
+  "author": "Conrad + Claudian",
+  "isDesktopOnly": false
+}
