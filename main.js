@@ -16,7 +16,7 @@
 const obsidian = require('obsidian');
 const cmView = require('@codemirror/view');
 const cmState = require('@codemirror/state');
-const { ViewPlugin, Decoration } = cmView;
+const { ViewPlugin, Decoration, EditorView } = cmView;
 const { RangeSetBuilder } = cmState;
 
 const SOURCE_PLUGIN_ID = 'side-note';
@@ -24,7 +24,8 @@ const VIEW_TYPE = 'claudian-side-note-panel';
 
 const DEFAULT_SETTINGS = {
   showHighlights: true,
-  showResolvedComments: false,         // false → "Unresolved" tab; true → "All" tab
+  showResolvedComments: false,         // legacy (kept for backward read; tabFilter is canonical)
+  tabFilter: 'unresolved',             // 'unresolved' | 'all' | 'resolved'
   highlightColor: '#FFC800',
   highlightOpacity: 0.2,
   commentSortOrder: 'position',
@@ -58,7 +59,7 @@ class ClaudianSideNote extends obsidian.Plugin {
     this.registerView(VIEW_TYPE, (leaf) => new ClaudianSideNoteView(leaf, this));
 
     // Editor highlighting — Live Preview / Source mode (CodeMirror 6)
-    this.registerEditorExtension([createHighlightExtension(this)]);
+    this.registerEditorExtension(createHighlightExtension(this));
 
     // Editor highlighting — Reading mode (rendered markdown)
     this.registerMarkdownPostProcessor((el, ctx) => {
@@ -70,6 +71,23 @@ class ClaudianSideNote extends obsidian.Plugin {
     // typed and saved it. Lives on the plugin instance (not in settings) so
     // it's never persisted across reloads.
     this.pendingDraft = null;
+
+    // Comments currently awaiting a Claudian reply (after @-mention). Transient.
+    this.awaitingClaudianFor = new Set();
+
+    // In-progress reply inputs — both *which* comments have an open reply
+    // box and *what* the user has typed into each. Survives re-renders so a
+    // watcher refresh doesn't wipe in-flight typing.
+    this.openReplyFor = new Set();
+    this.pendingReplyTexts = new Map();
+
+    // Auto-reload data.json when it's modified out-of-band (Claudian writing
+    // replies, manual edits). vault.on('modify') doesn't fire for files under
+    // .obsidian/, so we poll mtime.
+    this.dataJsonPath = `.obsidian/plugins/${this.manifest.id}/data.json`;
+    this.lastKnownMtime = 0;
+    this.suppressWatcherUntil = 0;
+    this.setupDataJsonWatcher();
 
     this.addRibbonIcon('message-square', 'Open Claudian SideNote panel', () => this.activateView());
 
@@ -145,11 +163,67 @@ class ClaudianSideNote extends obsidian.Plugin {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data || {});
     if (!Array.isArray(this.settings.comments)) this.settings.comments = [];
+
+    // Migrate legacy boolean → enum if tabFilter wasn't set.
+    if (!this.settings.tabFilter) {
+      this.settings.tabFilter = this.settings.showResolvedComments ? 'all' : 'unresolved';
+    }
   }
 
   async saveSettings() {
+    // Tell the watcher to ignore changes for the next second — covers the
+    // window between writing and the next poll picking up the new mtime.
+    this.suppressWatcherUntil = Date.now() + 1000;
     await this.saveData(this.settings);
+    try {
+      const stat = await this.app.vault.adapter.stat(this.dataJsonPath);
+      if (stat) this.lastKnownMtime = stat.mtime;
+    } catch (e) { /* ignore */ }
     this.refreshAllEditors();
+  }
+
+  /**
+   * Poll mtime of our data.json. When it changes outside of our own writes
+   * (Claudian editing the file, manual edits, sync clients), reload settings
+   * and refresh UI. Also clears awaitingClaudianFor for any comment whose
+   * thread grew since the last reload — that's how the "thinking" indicator
+   * disappears when a reply lands.
+   */
+  setupDataJsonWatcher() {
+    // Establish baseline mtime so we don't fire immediately on startup.
+    this.app.vault.adapter.stat(this.dataJsonPath)
+      .then(stat => { if (stat) this.lastKnownMtime = stat.mtime; })
+      .catch(() => { /* ignore */ });
+
+    this.registerInterval(window.setInterval(async () => {
+      if (Date.now() < this.suppressWatcherUntil) return;
+      let stat;
+      try { stat = await this.app.vault.adapter.stat(this.dataJsonPath); } catch (e) { return; }
+      if (!stat) return;
+      if (stat.mtime <= this.lastKnownMtime + 200) return;
+
+      this.lastKnownMtime = stat.mtime;
+
+      // Capture previous thread lengths so we can detect new replies.
+      const prevThreadLens = new Map();
+      for (const c of this.settings.comments) {
+        prevThreadLens.set(c.id, Array.isArray(c.thread) ? c.thread.length : 0);
+      }
+
+      await this.loadSettings();
+
+      // Clear awaiting state for comments whose thread grew.
+      for (const c of this.settings.comments) {
+        const prev = prevThreadLens.get(c.id);
+        const cur = Array.isArray(c.thread) ? c.thread.length : 0;
+        if (prev !== undefined && cur > prev) {
+          this.awaitingClaudianFor.delete(c.id);
+        }
+      }
+
+      this.refreshAllViews();
+      this.refreshAllEditors();
+    }, 1500));
   }
 
   /**
@@ -210,11 +284,367 @@ class ClaudianSideNote extends obsidian.Plugin {
     this.pendingDraft = null;
     await this.saveSettings(); // also refreshes editors
     this.refreshAllViews();
+
+    if (this.hasClaudianMention(commentText)) {
+      this.pingClaudian(newComment, 'comment');
+    }
   }
 
   cancelDraft() {
     this.pendingDraft = null;
     this.refreshAllViews();
+  }
+
+  /**
+   * Editor → panel navigation. Clicking a highlight in any editor mode lands
+   * here. Opens the panel if closed, finds the matching comment card, scrolls
+   * it into view, and pulses it briefly so the user can see where they landed.
+   *
+   * If the matching card isn't currently rendered (e.g. the comment is on
+   * another file and panelScope === 'current-file'), we don't switch scope
+   * automatically — that would be jarring. We just open the panel; the user
+   * can switch tabs themselves.
+   */
+  async focusCommentInPanel(commentId) {
+    if (!commentId) return;
+
+    await this.activateView();
+
+    // Defer to next tick so the panel's DOM exists after activateView.
+    setTimeout(() => {
+      const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+      for (const leaf of leaves) {
+        const view = leaf.view;
+        if (!view || !view.contentEl) continue;
+        const card = view.contentEl.querySelector(`.csn-comment[data-comment-id="${commentId}"]`);
+        if (!card) continue;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.remove('csn-flash'); // restart animation if re-clicked
+        void card.offsetWidth; // force reflow so the keyframe replays
+        card.classList.add('csn-flash');
+        setTimeout(() => card.classList.remove('csn-flash'), 1500);
+        return;
+      }
+    }, 50);
+  }
+
+  /**
+   * Execute a structured action attached to a thread message. Action shapes:
+   *   { type: 'resolve' }
+   *   { type: 'replace', filePath, from: {line, ch}, to: {line, ch}, newText }
+   *   { type: 'navigate', filePath, line }
+   * Returns true on success, false on failure (with a notice).
+   */
+  async executeMessageAction(commentId, action) {
+    if (!action || !action.type) return false;
+
+    try {
+      switch (action.type) {
+        case 'resolve': {
+          const c = this.settings.comments.find(c => c.id === commentId);
+          if (!c) return false;
+          c.resolved = true;
+          c.resolvedAt = new Date().toISOString();
+          await this.saveSettings();
+          this.refreshAllViews();
+          return true;
+        }
+
+        case 'replace': {
+          if (!action.filePath || !action.from || !action.to || action.newText === undefined) {
+            new obsidian.Notice('Replace action missing required fields.');
+            return false;
+          }
+          const file = this.app.vault.getAbstractFileByPath(action.filePath);
+          if (!(file instanceof obsidian.TFile)) {
+            new obsidian.Notice(`File not found: ${action.filePath}`);
+            return false;
+          }
+          // Use vault.process for an atomic read-modify-write.
+          await this.app.vault.process(file, (content) => {
+            const lines = content.split('\n');
+            const { from, to, newText } = action;
+            if (from.line < 0 || to.line >= lines.length || from.line > to.line) return content;
+
+            if (from.line === to.line) {
+              const line = lines[from.line];
+              lines[from.line] = line.slice(0, from.ch) + newText + line.slice(to.ch);
+            } else {
+              const head = lines[from.line].slice(0, from.ch);
+              const tail = lines[to.line].slice(to.ch);
+              const replaced = (head + newText + tail).split('\n');
+              lines.splice(from.line, to.line - from.line + 1, ...replaced);
+            }
+            return lines.join('\n');
+          });
+          new obsidian.Notice('Applied.');
+          return true;
+        }
+
+        case 'navigate': {
+          if (!action.filePath) return false;
+          const file = this.app.vault.getAbstractFileByPath(action.filePath);
+          if (!(file instanceof obsidian.TFile)) {
+            new obsidian.Notice(`File not found: ${action.filePath}`);
+            return false;
+          }
+          await this.app.workspace.getLeaf(false).openFile(file, {
+            active: true,
+            eState: { line: action.line || 0 }
+          });
+          return true;
+        }
+
+        default:
+          new obsidian.Notice(`Unknown action type: ${action.type}`);
+          return false;
+      }
+    } catch (err) {
+      console.error('[claudian-side-note] action failed', err);
+      new obsidian.Notice('Action failed — see console.');
+      return false;
+    }
+  }
+
+  /**
+   * Look for `@claude` / `@claudian` mentions (case-insensitive, word boundary).
+   */
+  hasClaudianMention(text) {
+    if (!text) return false;
+    return /(^|\s|[^\w@])@(claude|claudian)\b/i.test(text);
+  }
+
+  /**
+   * Send a prompt into the Claudian chat plugin so Claude can act on a
+   * comment that mentioned them. Best-effort: if Claudian isn't installed or
+   * the API surface has shifted, we surface a notice and bail without
+   * disrupting normal comment creation.
+   */
+  async pingClaudian(comment, mentionFrom) {
+    const claudian = this.app.plugins.plugins.realclaudian;
+    if (!claudian) {
+      new obsidian.Notice('Claudian plugin not available — @-mention ignored.');
+      return;
+    }
+
+    const prompt = this.buildClaudianPrompt(comment, mentionFrom);
+
+    // Mark the comment as awaiting a reply — surfaces the "thinking" indicator.
+    this.awaitingClaudianFor.add(comment.id);
+    this.refreshAllViews();
+
+    // Remember active leaf so we can restore focus after.
+    const prevLeaf = this.app.workspace.activeLeaf;
+
+    try {
+      // Find an existing Claudian view without activating; if none, open one
+      // in the background (active: false) so the user's focus doesn't shift.
+      let view = typeof claudian.getView === 'function' ? claudian.getView() : null;
+      if (!view) {
+        const placement = (claudian.settings && claudian.settings.chatViewPlacement) || 'right-sidebar';
+        let leaf;
+        if (placement === 'left-sidebar') leaf = this.app.workspace.getLeftLeaf(false);
+        else if (placement === 'main-tab') leaf = this.app.workspace.getLeaf('tab');
+        else leaf = this.app.workspace.getRightLeaf(false);
+
+        if (leaf) {
+          await leaf.setViewState({ type: 'claudian-view', active: false });
+          view = typeof claudian.getView === 'function' ? claudian.getView() : null;
+        }
+      }
+      if (!view) throw new Error('Could not open Claudian view');
+
+      const tabManager = typeof view.getTabManager === 'function' ? view.getTabManager() : null;
+      const tab = tabManager && typeof tabManager.getActiveTab === 'function' ? tabManager.getActiveTab() : null;
+      const ic = tab && tab.controllers && tab.controllers.inputController;
+      if (!ic || typeof ic.sendMessage !== 'function') {
+        throw new Error('Could not reach Claudian input controller');
+      }
+      await ic.sendMessage({ content: prompt });
+    } catch (err) {
+      console.error('[claudian-side-note] pingClaudian failed', err);
+      this.awaitingClaudianFor.delete(comment.id);
+      this.refreshAllViews();
+      new obsidian.Notice('Failed to ping Claudian — see console.');
+      return;
+    }
+
+    // Snap focus back to the user's previous view if it shifted.
+    if (prevLeaf && this.app.workspace.activeLeaf !== prevLeaf) {
+      this.app.workspace.setActiveLeaf(prevLeaf, { focus: true });
+    }
+  }
+
+  /**
+   * Build the prompt sent into Claudian's chat input when @-mentioned.
+   * Includes the anchor, the full thread, and a structured spec for replying
+   * (including optional `actions` so Claudian can offer one-click apply).
+   */
+  buildClaudianPrompt(comment, mentionFrom) {
+    const fileLink = `[[${comment.filePath}]]`;
+    const anchor = (comment.selectedText || '').slice(0, 400);
+    const threadText = (comment.thread || [])
+      .map(m => `> ${m.author === 'claudian' ? 'You (Claudian)' : 'Conrad'}: ${m.text}`)
+      .join('\n');
+    const mentionLine = mentionFrom === 'reply'
+      ? `Conrad replied with an @-mention.`
+      : `Conrad created a comment with an @-mention.`;
+
+    return [
+      `${mentionLine} On ${fileLink} (comment id \`${comment.id}\`):`,
+      '',
+      'Anchored text:',
+      `> ${anchor.replace(/\n/g, '\n> ')}`,
+      `Source position: line ${comment.startLine + 1}, chars ${comment.startChar}-${comment.endChar}.`,
+      '',
+      'Comment thread:',
+      `> Conrad: ${comment.comment}`,
+      threadText || null,
+      '',
+      `Read surrounding context in ${fileLink}, then reply by appending a thread entry to this comment in \`.obsidian/plugins/claudian-side-note/data.json\`. Find the comment with \`"id": "${comment.id}"\` and push onto its \`thread\` array:`,
+      '',
+      '```json',
+      '{',
+      '  "author": "claudian",',
+      '  "text": "<your reply, markdown ok>",',
+      '  "timestamp": <Date.now()>,',
+      '  "actions": [    // optional — only when you\'re proposing concrete next steps',
+      '    { "label": "Apply", "type": "replace", "filePath": "<path>", "from": {"line": N, "ch": N}, "to": {"line": N, "ch": N}, "newText": "<replacement>" },',
+      '    { "label": "Resolve", "type": "resolve" }',
+      '  ]',
+      '}',
+      '```',
+      '',
+      'Action types supported by the panel: `resolve` (marks this comment resolved), `replace` (text replacement at the given range), `navigate` (`{type:"navigate", filePath, line}`). Omit `actions` entirely if the reply is just a discussion.'
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Permanently delete a comment from the store. Confirms via Obsidian
+   * Notice but the actual confirm dialog lives in the panel (since the
+   * plugin shouldn't block on `confirm()`).
+   */
+  async deleteComment(commentId) {
+    const idx = this.settings.comments.findIndex(c => c.id === commentId);
+    if (idx === -1) return;
+    this.settings.comments.splice(idx, 1);
+    this.awaitingClaudianFor.delete(commentId);
+    await this.saveSettings();
+    this.refreshAllViews();
+  }
+
+  /**
+   * Append a reply (always authored as Conrad in this UI) to a comment's
+   * thread, persist, and refresh both panel and editor.
+   *
+   * Claudian-authored replies don't go through this method — those are
+   * written into data.json directly when I edit the file from the chat.
+   */
+  async addReplyToComment(commentId, text) {
+    if (!text) return;
+    const c = this.settings.comments.find(c => c.id === commentId);
+    if (!c) return;
+    if (!Array.isArray(c.thread)) c.thread = [];
+    // Check whether Claudian was already part of this thread BEFORE we push
+    // the new entry — that determines whether the reply auto-pings.
+    const claudianAlreadyInThread = c.thread.some(m => m && m.author === 'claudian');
+    c.thread.push({
+      author: 'conrad',
+      text,
+      timestamp: Date.now()
+    });
+    await this.saveSettings(); // also refreshes editors
+    this.refreshAllViews();
+
+    // Ping Claudian if either:
+    //   (a) the user explicitly @-mentioned, or
+    //   (b) Claudian is already in the thread — replying continues the convo.
+    if (this.hasClaudianMention(text) || claudianAlreadyInThread) {
+      this.pingClaudian(c, 'reply');
+    }
+  }
+
+  /**
+   * Flip a comment's resolved state. Sets `resolvedAt` on transition to
+   * resolved, clears it on transition back. Persists + refreshes both panel
+   * and editor highlights (so a resolved comment disappears from "Unresolved"
+   * tab + hides its highlight when `showResolvedComments === false`).
+   */
+  async toggleResolve(commentId) {
+    const c = this.settings.comments.find(c => c.id === commentId);
+    if (!c) return;
+    c.resolved = !c.resolved;
+    c.resolvedAt = c.resolved ? new Date().toISOString() : null;
+    await this.saveSettings(); // also refreshes editors
+    this.refreshAllViews();
+  }
+
+  /**
+   * Open the file the comment anchors to and scroll/select its source range.
+   * If the file is already open in a leaf, reuse that leaf; otherwise open in
+   * a new leaf. Selection lands exactly on the anchored text so the user can
+   * see what was originally selected.
+   */
+  async jumpToComment(comment) {
+    if (!comment || !comment.filePath) return;
+    const file = this.app.vault.getAbstractFileByPath(comment.filePath);
+    if (!(file instanceof obsidian.TFile)) {
+      new obsidian.Notice(`Claudian SideNote: file not found — ${comment.filePath}`);
+      return;
+    }
+
+    // Prefer an already-open leaf for this file so we don't fragment the layout.
+    let targetLeaf = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const v = leaf && leaf.view;
+      if (v && v.file && v.file.path === comment.filePath) targetLeaf = leaf;
+    });
+    const fileAlreadyOpen = !!targetLeaf;
+    if (!targetLeaf) targetLeaf = this.app.workspace.getLeaf(false);
+
+    if (!fileAlreadyOpen) {
+      // openFile's eState is the official Obsidian API for "scroll to line on open"
+      // — works in both source and preview modes.
+      await targetLeaf.openFile(file, {
+        active: true,
+        eState: { line: comment.startLine, ch: comment.startChar }
+      });
+    } else {
+      this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+    }
+
+    // Even if the file was already open we still need to navigate to the line.
+    // Defer so the view has time to mount its editor / preview DOM.
+    setTimeout(() => {
+      const view = targetLeaf.view;
+      if (!view) return;
+
+      // getMode() returns 'source' (Live Preview + Source) or 'preview' (Reading).
+      // view.editor exists in both — don't use its presence as a mode check.
+      const mode = view.getMode && view.getMode();
+
+      if (mode === 'preview') {
+        // Reading mode. setEphemeralState({line}) is what Obsidian's own
+        // internal navigation uses — scrolls the preview to the line.
+        if (typeof view.setEphemeralState === 'function') {
+          try { view.setEphemeralState({ line: comment.startLine }); } catch (e) { /* ignore */ }
+        }
+        // Fallback: preview.applyScroll if available
+        if (view.previewMode && typeof view.previewMode.applyScroll === 'function') {
+          try { view.previewMode.applyScroll(comment.startLine); } catch (e) { /* ignore */ }
+        }
+        return;
+      }
+
+      // Source / Live Preview — select the anchored range and focus.
+      const editor = view.editor;
+      if (!editor) return;
+      const from = { line: comment.startLine, ch: comment.startChar };
+      const to = { line: comment.endLine, ch: comment.endChar };
+      editor.setSelection(from, to);
+      editor.scrollIntoView({ from, to }, true);
+      editor.focus();
+    }, 50);
   }
 
   /**
@@ -305,9 +735,7 @@ class ClaudianSideNote extends obsidian.Plugin {
     let comments = this.settings.comments.filter(c =>
       c.filePath === filePath && !c.isOrphaned
     );
-    if (!this.settings.showResolvedComments) {
-      comments = comments.filter(c => !c.resolved);
-    }
+    comments = applyTabFilter(comments, this.settings.tabFilter);
     if (comments.length === 0) return;
 
     const bg = hexToRgba(this.settings.highlightColor, this.settings.highlightOpacity);
@@ -317,6 +745,12 @@ class ClaudianSideNote extends obsidian.Plugin {
       wrap.style.backgroundColor = bg;
       wrap.dataset.commentId = c.id;
       wrap.textContent = matchText;
+      // Reading mode is plain DOM — wire click directly. (Live Preview /
+      // Source mode go through the CodeMirror domEventHandlers extension.)
+      wrap.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.focusCommentInPanel(c.id);
+      });
       wrap.title = (c.thread && c.thread.length > 0)
         ? `Conrad: ${c.comment} (+${c.thread.length} replies)`
         : `Conrad: ${c.comment}`;
@@ -451,6 +885,12 @@ class ClaudianSideNoteView extends obsidian.ItemView {
 
   render() {
     const container = this.contentEl;
+
+    // Capture focus + cursor state before we wipe the DOM. We restore after
+    // the new tree is built so watcher-driven refreshes don't yank focus away
+    // mid-typing.
+    const focusContext = this.captureFocusContext();
+
     container.empty();
     container.addClass('claudian-sidenote-panel');
 
@@ -467,6 +907,7 @@ class ClaudianSideNoteView extends obsidian.ItemView {
 
     if (scope === 'current-file' && !activeFile) {
       this.renderEmpty(container, 'No active file');
+      this.restoreFocusContext(focusContext);
       return;
     }
 
@@ -475,9 +916,7 @@ class ClaudianSideNoteView extends obsidian.ItemView {
     if (scope === 'current-file') {
       comments = comments.filter(c => c.filePath === activeFile.path);
     }
-    if (!this.plugin.settings.showResolvedComments) {
-      comments = comments.filter(c => !c.resolved);
-    }
+    comments = applyTabFilter(comments, this.plugin.settings.tabFilter);
 
     // Sort by file then position
     comments.sort((a, b) => {
@@ -491,6 +930,7 @@ class ClaudianSideNoteView extends obsidian.ItemView {
         container,
         scope === 'current-file' ? 'No comments on this file' : 'No comments yet'
       );
+      this.restoreFocusContext(focusContext);
       return;
     }
 
@@ -500,6 +940,52 @@ class ClaudianSideNoteView extends obsidian.ItemView {
     } else {
       this.renderFlatList(body, comments);
     }
+
+    this.restoreFocusContext(focusContext);
+  }
+
+  /**
+   * Capture which textarea (if any) in our panel was focused, and where the
+   * cursor was. Used to survive watcher-driven re-renders mid-typing.
+   */
+  captureFocusContext() {
+    const ae = document.activeElement;
+    if (!ae || !this.contentEl.contains(ae)) return null;
+    if (typeof ae.selectionStart !== 'number') return null; // not a text input
+
+    const base = {
+      selectionStart: ae.selectionStart,
+      selectionEnd: ae.selectionEnd
+    };
+
+    if (ae.classList.contains('csn-draft-input')) {
+      return { type: 'draft', ...base };
+    }
+    if (ae.classList.contains('csn-reply-input')) {
+      const card = ae.closest('.csn-comment');
+      const cid = card && card.getAttribute('data-comment-id');
+      if (cid) return { type: 'reply', commentId: cid, ...base };
+    }
+    return null;
+  }
+
+  /**
+   * Restore focus to the matching textarea after a re-render. Best-effort —
+   * silently no-ops if the target isn't present anymore (e.g. the comment was
+   * deleted while we were typing — unlikely but cheap to guard).
+   */
+  restoreFocusContext(ctx) {
+    if (!ctx) return;
+    let target = null;
+    if (ctx.type === 'draft') {
+      target = this.contentEl.querySelector('.csn-draft-input');
+    } else if (ctx.type === 'reply') {
+      const card = this.contentEl.querySelector(`.csn-comment[data-comment-id="${ctx.commentId}"]`);
+      target = card && card.querySelector('.csn-reply-input');
+    }
+    if (!target) return;
+    target.focus();
+    try { target.setSelectionRange(ctx.selectionStart, ctx.selectionEnd); } catch (e) { /* ignore */ }
   }
 
   /* Header --------------------------------------------------------------- */
@@ -521,29 +1007,42 @@ class ClaudianSideNoteView extends obsidian.ItemView {
     obsidian.setIcon(cogBtn, 'settings');
     cogBtn.addEventListener('click', (ev) => this.openSettingsMenu(ev));
 
-    // Tabs: All / Unresolved (N)
+    // Tabs: All / Unresolved (N) / Resolved (N).
+    // Counts respect the current panel scope so the badge agrees with the list below.
     const tabRow = header.createDiv('csn-tab-row');
-    const all = this.plugin.settings.comments;
-    const unresolvedCount = all.filter(c => !c.resolved).length;
 
-    const allTab = tabRow.createDiv('csn-tab');
-    allTab.setText('All');
-    if (this.plugin.settings.showResolvedComments) allTab.addClass('csn-tab-active');
-    allTab.addEventListener('click', async () => {
-      this.plugin.settings.showResolvedComments = true;
-      await this.plugin.saveSettings();
-      this.render();
-    });
+    const scope = this.plugin.settings.panelScope;
+    const activeFile = this.app.workspace.getActiveFile();
+    let scoped = this.plugin.settings.comments;
+    if (scope === 'current-file' && activeFile) {
+      scoped = scoped.filter(c => c.filePath === activeFile.path);
+    } else if (scope === 'current-file' && !activeFile) {
+      scoped = [];
+    }
+    const unresolvedCount = scoped.filter(c => !c.resolved).length;
+    const resolvedCount = scoped.filter(c => c.resolved).length;
 
-    const unresolvedTab = tabRow.createDiv('csn-tab');
-    unresolvedTab.createSpan({ text: 'Unresolved' });
-    const countPill = unresolvedTab.createSpan({ cls: 'csn-count-pill', text: String(unresolvedCount) });
-    if (!this.plugin.settings.showResolvedComments) unresolvedTab.addClass('csn-tab-active');
-    unresolvedTab.addEventListener('click', async () => {
-      this.plugin.settings.showResolvedComments = false;
-      await this.plugin.saveSettings();
-      this.render();
-    });
+    const current = this.plugin.settings.tabFilter || 'unresolved';
+
+    const makeTab = (key, label, count) => {
+      const tab = tabRow.createDiv('csn-tab');
+      tab.createSpan({ text: label });
+      if (count != null) {
+        tab.createSpan({ cls: 'csn-count-pill', text: String(count) });
+      }
+      if (current === key) tab.addClass('csn-tab-active');
+      tab.addEventListener('click', async () => {
+        this.plugin.settings.tabFilter = key;
+        // Keep legacy boolean in sync so older read paths still behave sanely.
+        this.plugin.settings.showResolvedComments = (key === 'all' || key === 'resolved');
+        await this.plugin.saveSettings();
+        this.render();
+      });
+    };
+
+    makeTab('all',        'All',        null);
+    makeTab('unresolved', 'Unresolved', unresolvedCount);
+    makeTab('resolved',   'Resolved',   resolvedCount);
   }
 
   openSettingsMenu(ev) {
@@ -610,13 +1109,24 @@ class ClaudianSideNoteView extends obsidian.ItemView {
 
     // Quote — show the selected text so the user can confirm what they're commenting on.
     const quote = draftEl.createDiv('csn-draft-quote');
-    quote.textContent = draft.selectedText;
+    obsidian.MarkdownRenderer.render(
+      this.app,
+      draft.selectedText,
+      quote,
+      draft.filePath || '',
+      this
+    );
 
     // Textarea — auto-focused.
     const textarea = draftEl.createEl('textarea', {
       cls: 'csn-draft-input',
       attr: { placeholder: 'Your comment…', rows: '3' }
     });
+    // Restore in-progress text if a previous render captured it.
+    textarea.value = draft.text || '';
+    // Persist on every keystroke so watcher-driven re-renders don't wipe input.
+    textarea.addEventListener('input', () => { draft.text = textarea.value; });
+    attachMentionAutocomplete(textarea);
 
     const actions = draftEl.createDiv('csn-draft-actions');
     const cancelBtn = actions.createEl('button', { text: 'Cancel', cls: 'csn-draft-cancel' });
@@ -635,7 +1145,7 @@ class ClaudianSideNoteView extends obsidian.ItemView {
     saveBtn.addEventListener('click', doSave);
 
     textarea.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+      if (ev.key === 'Enter' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
         ev.preventDefault();
         doSave();
       } else if (ev.key === 'Escape') {
@@ -644,8 +1154,13 @@ class ClaudianSideNoteView extends obsidian.ItemView {
       }
     });
 
-    // Defer focus so the textarea is actually mounted before we focus.
-    setTimeout(() => textarea.focus(), 0);
+    // Auto-focus only on the very first render of this draft (when the user
+    // just opened it). Subsequent watcher-driven re-renders mustn't steal
+    // focus from wherever the user has moved to.
+    if (!draft._rendered) {
+      draft._rendered = true;
+      setTimeout(() => textarea.focus(), 0);
+    }
   }
 
   renderFlatList(container, comments) {
@@ -728,6 +1243,7 @@ class ClaudianSideNoteView extends obsidian.ItemView {
 
   renderComment(container, comment) {
     const card = container.createDiv('csn-comment');
+    card.setAttribute('data-comment-id', comment.id);
     if (comment.resolved) card.addClass('csn-resolved');
     if (comment.isOrphaned) card.addClass('csn-orphaned');
 
@@ -746,12 +1262,98 @@ class ClaudianSideNoteView extends obsidian.ItemView {
       this.renderMessage(card, msg, comment, false);
     }
 
-    // Subtle reply affordance (Stage 5 turns this into an input)
+    // Thinking indicator — shown while a Claudian reply is in flight.
+    if (this.plugin.awaitingClaudianFor && this.plugin.awaitingClaudianFor.has(comment.id)) {
+      const thinking = card.createDiv('csn-thinking-row');
+      const dot = thinking.createSpan('csn-thinking-dot');
+      void dot;
+      thinking.createSpan({ text: 'Claudian is thinking…', cls: 'csn-thinking-text' });
+    }
+
+    // Reply affordance — click to expand an inline reply input on this card.
     const replyRow = card.createDiv('csn-reply-row');
     const replyLink = replyRow.createSpan('csn-reply-link');
     obsidian.setIcon(replyLink, 'corner-down-right');
     replyLink.appendText(' Reply');
-    replyLink.title = 'Reply UI coming in Stage 5';
+    replyLink.title = 'Reply';
+    replyLink.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      // If an input already exists, focus it instead of stacking another.
+      const existing = card.querySelector(':scope > .csn-reply-input-row');
+      if (existing) {
+        const ta = existing.querySelector('textarea');
+        if (ta) ta.focus();
+        return;
+      }
+      // Track open state so refreshes auto-reopen.
+      this.plugin.openReplyFor.add(comment.id);
+      replyRow.style.display = 'none';
+      this.renderReplyInput(card, comment, replyRow);
+    });
+
+    // Auto-reopen reply input if it was open before a re-render.
+    // Pass autoReopened so it doesn't steal focus from elsewhere.
+    if (this.plugin.openReplyFor.has(comment.id)) {
+      replyRow.style.display = 'none';
+      this.renderReplyInput(card, comment, replyRow, { autoReopened: true });
+    }
+  }
+
+  /**
+   * Inline reply input — appended to a comment card when the user clicks
+   * "↳ Reply". Cmd/Ctrl+Enter saves, Esc cancels. `replyRow` is the parent
+   * affordance we hide while the input is open and restore on close.
+   */
+  renderReplyInput(card, comment, replyRow, opts = {}) {
+    const row = card.createDiv('csn-reply-input-row');
+
+    const textarea = row.createEl('textarea', {
+      cls: 'csn-reply-input',
+      attr: { placeholder: 'Reply…', rows: '2' }
+    });
+    // Restore in-progress text if any.
+    textarea.value = this.plugin.pendingReplyTexts.get(comment.id) || '';
+    // Persist on every keystroke so refreshes don't wipe input.
+    textarea.addEventListener('input', () => {
+      this.plugin.pendingReplyTexts.set(comment.id, textarea.value);
+    });
+    attachMentionAutocomplete(textarea);
+
+    const actions = row.createDiv('csn-reply-actions');
+    const cancelBtn = actions.createEl('button', { text: 'Cancel', cls: 'csn-reply-cancel' });
+    const saveBtn = actions.createEl('button', { text: 'Reply', cls: 'csn-reply-save mod-cta' });
+
+    const close = () => {
+      row.remove();
+      if (replyRow) replyRow.style.display = '';
+      this.plugin.openReplyFor.delete(comment.id);
+      this.plugin.pendingReplyTexts.delete(comment.id);
+    };
+    const doSave = async () => {
+      const text = textarea.value.trim();
+      if (!text) { textarea.focus(); return; }
+      this.plugin.openReplyFor.delete(comment.id);
+      this.plugin.pendingReplyTexts.delete(comment.id);
+      await this.plugin.addReplyToComment(comment.id, text);
+      // Full re-render happens via refreshAllViews — replyRow comes back naturally.
+    };
+
+    cancelBtn.addEventListener('click', (ev) => { ev.stopPropagation(); close(); });
+    saveBtn.addEventListener('click', (ev) => { ev.stopPropagation(); doSave(); });
+
+    textarea.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+        ev.preventDefault();
+        doSave();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        close();
+      }
+    });
+
+    if (!opts.autoReopened) {
+      setTimeout(() => textarea.focus(), 0);
+    }
   }
 
   renderMessage(container, msg, parentComment, isFirst) {
@@ -773,31 +1375,121 @@ class ClaudianSideNoteView extends obsidian.ItemView {
       meta.createSpan({ text: this.formatRelativeTime(msg.timestamp), cls: 'csn-msg-time' });
     }
 
-    // Status icons (only on the first/root message of a thread)
+    // Status icons + actions (only on the first/root message of a thread)
     if (isFirst) {
       const statusGroup = header.createDiv('csn-msg-status');
+
       if (parentComment.isOrphaned) {
         const o = statusGroup.createSpan({ cls: 'csn-status-icon csn-status-orphan', attr: { 'aria-label': 'Anchor text orphaned' } });
         obsidian.setIcon(o, 'unlink');
         o.title = 'Anchor text orphaned';
       }
-      if (parentComment.resolved) {
-        const r = statusGroup.createSpan({ cls: 'csn-status-icon csn-status-resolved', attr: { 'aria-label': 'Resolved' } });
-        obsidian.setIcon(r, 'check-circle-2');
-        r.title = 'Resolved';
-      }
+
+      // Resolve toggle — always visible on first message. Icon swaps:
+      // filled check when resolved, open circle when not.
+      const resolveBtn = statusGroup.createEl('button', {
+        cls: 'csn-status-icon csn-resolve-toggle',
+        attr: {
+          'aria-label': parentComment.resolved ? 'Mark unresolved' : 'Mark resolved'
+        }
+      });
+      if (parentComment.resolved) resolveBtn.addClass('is-resolved');
+      obsidian.setIcon(resolveBtn, parentComment.resolved ? 'check-circle-2' : 'circle');
+      resolveBtn.title = parentComment.resolved ? 'Resolved — click to reopen' : 'Mark as resolved';
+      resolveBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.plugin.toggleResolve(parentComment.id);
+      });
+
+      // Delete — destructive. Confirm before firing.
+      const deleteBtn = statusGroup.createEl('button', {
+        cls: 'csn-status-icon csn-delete-btn',
+        attr: { 'aria-label': 'Delete comment' }
+      });
+      obsidian.setIcon(deleteBtn, 'trash-2');
+      deleteBtn.title = 'Delete comment';
+      deleteBtn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const replyCount = (parentComment.thread || []).length;
+        const detail = replyCount > 0
+          ? `This comment has ${replyCount} repl${replyCount === 1 ? 'y' : 'ies'}. Delete anyway?`
+          : 'Delete this comment? This cannot be undone.';
+        if (!confirm(detail)) return;
+        await this.plugin.deleteComment(parentComment.id);
+      });
     }
 
-    // Anchor quote (only on first message)
+    // Anchor quote (only on first message) — click to jump to the source.
     if (isFirst && parentComment.selectedText) {
       const quote = msgEl.createDiv('csn-anchor-quote');
-      quote.setText(this.truncate(parentComment.selectedText, 240));
+      // Render the anchor as markdown so bold/italics/links/lists land as HTML.
+      // No truncation here — CSS max-height + scroll handles visual constraint
+      // (truncating raw markdown can cut markup in half).
+      obsidian.MarkdownRenderer.render(
+        this.app,
+        parentComment.selectedText,
+        quote,
+        parentComment.filePath || '',
+        this
+      );
+      quote.title = 'Click to jump to this text';
+      quote.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        this.plugin.jumpToComment(parentComment);
+      });
     }
 
     // Body
     if (msg.text) {
       const body = msgEl.createDiv('csn-msg-body');
-      body.setText(msg.text);
+      // Render markdown — handles bold/italics/links/lists/blockquotes/code/etc.
+      // `this` is the MarkdownRenderChild lifecycle hook (ItemView extends Component).
+      obsidian.MarkdownRenderer.render(
+        this.app,
+        msg.text,
+        body,
+        parentComment.filePath || '',
+        this
+      );
+    }
+
+    // Action buttons — only on Claudian-authored messages with `actions` array.
+    if (msg.author === 'claudian' && Array.isArray(msg.actions) && msg.actions.length > 0) {
+      const actionsEl = msgEl.createDiv('csn-msg-actions');
+      for (const action of msg.actions) {
+        if (!action || !action.type) continue;
+        const btn = actionsEl.createEl('button', {
+          text: action.label || action.type,
+          cls: 'csn-msg-action ' + (action.type === 'replace' ? 'mod-cta' : '')
+        });
+        btn.title = this.actionTooltip(action);
+        btn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          btn.disabled = true;
+          const ok = await this.plugin.executeMessageAction(parentComment.id, action);
+          if (ok) {
+            // Visually consume so the user knows it landed.
+            btn.classList.add('csn-msg-action-done');
+            btn.setText('✓ ' + (action.label || action.type));
+          } else {
+            btn.disabled = false;
+          }
+        });
+      }
+    }
+  }
+
+  /** Human-readable summary for action button tooltip. */
+  actionTooltip(action) {
+    switch (action.type) {
+      case 'resolve': return 'Mark this comment resolved';
+      case 'replace':
+        return action.filePath && action.from
+          ? `Replace text at ${action.filePath}:${action.from.line + 1}`
+          : 'Apply the suggested text change';
+      case 'navigate':
+        return action.filePath ? `Open ${action.filePath}` : 'Navigate';
+      default: return action.type;
     }
   }
 
@@ -837,7 +1529,7 @@ class ClaudianSideNoteView extends obsidian.ItemView {
 /* ------------------------------------------------------------------------- */
 
 function createHighlightExtension(plugin) {
-  return ViewPlugin.fromClass(class {
+  const decorator = ViewPlugin.fromClass(class {
     constructor(view) {
       this.decorations = buildEditorDecorations(view, plugin);
     }
@@ -848,6 +1540,23 @@ function createHighlightExtension(plugin) {
   }, {
     decorations: v => v.decorations
   });
+
+  // Click on a highlight in Live Preview / Source mode → focus the matching
+  // comment in the panel. Don't prevent the normal click.
+  const clickHandler = EditorView.domEventHandlers({
+    click: (event /*, view */) => {
+      const target = event.target;
+      if (!target || !target.closest) return false;
+      const highlight = target.closest('.csn-highlight');
+      if (!highlight) return false;
+      const id = highlight.getAttribute('data-comment-id');
+      if (!id) return false;
+      plugin.focusCommentInPanel(id);
+      return false;
+    }
+  });
+
+  return [decorator, clickHandler];
 }
 
 function buildEditorDecorations(view, plugin) {
@@ -857,9 +1566,7 @@ function buildEditorDecorations(view, plugin) {
   let comments = plugin.settings.comments.filter(c =>
     c.filePath === filePath && !c.isOrphaned
   );
-  if (!plugin.settings.showResolvedComments) {
-    comments = comments.filter(c => !c.resolved);
-  }
+  comments = applyTabFilter(comments, plugin.settings.tabFilter);
   if (comments.length === 0) return Decoration.none;
 
   // RangeSetBuilder requires sorted input
@@ -1044,6 +1751,116 @@ function wrapTextInElement(rootEl, searchText, makeWrapper) {
   }
 
   return true;
+}
+
+/**
+ * Filter a list of comments according to the panel's tab selection.
+ * 'unresolved' (default): only !resolved
+ * 'resolved': only resolved
+ * 'all': no filtering
+ */
+function applyTabFilter(comments, tabFilter) {
+  switch (tabFilter) {
+    case 'all':       return comments;
+    case 'resolved':  return comments.filter(c => c.resolved);
+    case 'unresolved':
+    default:          return comments.filter(c => !c.resolved);
+  }
+}
+
+/**
+ * Attach a minimal `@`-mention autocomplete to a textarea. When the user
+ * types `@` (at start or after whitespace) followed by a prefix matching
+ * "claudian", a floating chip appears with the completion. Tab accepts.
+ *
+ * Returns a cleanup function that the caller can invoke to remove the popup
+ * (we don't bother — DOM is torn down when the panel re-renders).
+ */
+function attachMentionAutocomplete(textarea) {
+  const SUGGESTION = '@claudian';
+  const PREFIX = 'claudian'; // what the partial after @ must be a prefix of
+
+  const popup = document.createElement('div');
+  popup.className = 'csn-mention-popup';
+  popup.style.display = 'none';
+  popup.innerHTML = `<span class="csn-mention-suggestion">${SUGGESTION}</span><span class="csn-mention-hint">Tab</span>`;
+  document.body.appendChild(popup);
+
+  let active = false;
+
+  const hide = () => {
+    if (!active) return;
+    active = false;
+    popup.style.display = 'none';
+  };
+
+  const reposition = () => {
+    const rect = textarea.getBoundingClientRect();
+    popup.style.left = `${rect.left + 8}px`;
+    popup.style.top = `${rect.bottom + 4}px`;
+  };
+
+  const refresh = () => {
+    const cursor = textarea.selectionStart;
+    const before = textarea.value.slice(0, cursor);
+    // Match `@` at start-of-string or after whitespace, followed by 0+ word chars.
+    const match = before.match(/(^|\s)@(\w{0,16})$/);
+    if (!match) { hide(); return; }
+    const partial = match[2].toLowerCase();
+    if (partial && !PREFIX.startsWith(partial) && !'claude'.startsWith(partial)) {
+      hide();
+      return;
+    }
+    active = true;
+    popup.style.display = 'flex';
+    reposition();
+  };
+
+  const accept = () => {
+    if (!active) return false;
+    const cursor = textarea.selectionStart;
+    const before = textarea.value.slice(0, cursor);
+    const after = textarea.value.slice(cursor);
+    const match = before.match(/(^|\s)@(\w{0,16})$/);
+    if (!match) { hide(); return false; }
+    // Strip the @ + partial we matched, then insert the full suggestion + space.
+    const stripLen = 1 + match[2].length; // '@' + partial
+    const prefix = before.slice(0, before.length - stripLen);
+    const insertion = SUGGESTION + ' ';
+    textarea.value = prefix + insertion + after;
+    const newCursor = (prefix + insertion).length;
+    textarea.setSelectionRange(newCursor, newCursor);
+    hide();
+    // Fire input so any downstream listeners (auto-resize, etc.) update.
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  };
+
+  textarea.addEventListener('input', refresh);
+  textarea.addEventListener('click', refresh);
+  textarea.addEventListener('keyup', (ev) => {
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight' || ev.key === 'Home' || ev.key === 'End') {
+      refresh();
+    }
+  });
+  textarea.addEventListener('keydown', (ev) => {
+    if (!active) return;
+    if (ev.key === 'Tab') {
+      ev.preventDefault();
+      accept();
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      hide();
+    }
+  });
+  textarea.addEventListener('blur', () => {
+    // Give a click-on-popup chance to land (not implemented yet but cheap).
+    setTimeout(hide, 150);
+  });
+  window.addEventListener('scroll', () => { if (active) reposition(); }, true);
+  window.addEventListener('resize', () => { if (active) reposition(); });
+
+  return () => popup.remove();
 }
 
 /**

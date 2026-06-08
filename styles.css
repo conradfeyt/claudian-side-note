@@ -300,6 +300,54 @@
   color: var(--text-error);
 }
 
+/* Resolve toggle — interactive button. Reset native button styling. */
+button.csn-resolve-toggle {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: var(--text-faint);
+  transition: color 0.1s ease, transform 0.05s ease;
+  border-radius: 50%;
+}
+
+button.csn-resolve-toggle:hover {
+  color: var(--text-success);
+}
+
+button.csn-resolve-toggle:active {
+  transform: scale(0.92);
+}
+
+button.csn-resolve-toggle.is-resolved {
+  color: var(--text-success);
+}
+
+button.csn-resolve-toggle.is-resolved:hover {
+  color: var(--text-muted);
+}
+
+/* Delete button — same reset, danger-tinted hover */
+button.csn-delete-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: var(--text-faint);
+  transition: color 0.1s ease, transform 0.05s ease;
+  border-radius: 50%;
+}
+
+button.csn-delete-btn:hover {
+  color: var(--text-error, #d04848);
+}
+
+button.csn-delete-btn:active {
+  transform: scale(0.92);
+}
+
 .csn-status-resolved {
   color: var(--text-success);
 }
@@ -315,9 +363,23 @@
   background: var(--background-secondary);
   border-radius: 0 4px 4px 0;
   margin: 4px 0 10px 30px;         /* indent to align under the avatar */
-  white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
+  cursor: pointer;
+  transition: background-color 0.1s ease, border-left-color 0.1s ease;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* Tame rendered markdown inside the quote — Obsidian's defaults add too much margin */
+.csn-anchor-quote > *:first-child { margin-top: 0; }
+.csn-anchor-quote > *:last-child { margin-bottom: 0; }
+.csn-anchor-quote p { margin: 0; }
+.csn-anchor-quote ul, .csn-anchor-quote ol { margin: 4px 0; padding-left: 18px; }
+
+.csn-anchor-quote:hover {
+  background: var(--background-modifier-hover);
+  border-left-color: var(--interactive-accent);
 }
 
 /* Message body --------------------------------------------------------- */
@@ -325,10 +387,41 @@
 .csn-msg-body {
   font-size: 13px;
   line-height: 1.5;
-  white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-normal);
   margin-left: 30px;               /* indent under avatar */
+}
+
+/* Tame Obsidian's default markdown spacing inside message bodies */
+.csn-msg-body > *:first-child { margin-top: 0; }
+.csn-msg-body > *:last-child { margin-bottom: 0; }
+.csn-msg-body p { margin: 0 0 6px 0; }
+.csn-msg-body p:last-child { margin-bottom: 0; }
+.csn-msg-body ul, .csn-msg-body ol { margin: 4px 0; padding-left: 20px; }
+.csn-msg-body h1, .csn-msg-body h2, .csn-msg-body h3,
+.csn-msg-body h4, .csn-msg-body h5, .csn-msg-body h6 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 8px 0 4px 0;
+}
+.csn-msg-body blockquote {
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-left: 2px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+.csn-msg-body code {
+  font-size: 12px;
+  padding: 1px 4px;
+  background: var(--background-secondary);
+  border-radius: 3px;
+}
+.csn-msg-body pre {
+  font-size: 12px;
+  padding: 8px;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  overflow-x: auto;
 }
 
 /* Deleted file affordance --------------------------------------------- */
@@ -370,6 +463,64 @@
 .csn-deleted-remove:hover {
   background: var(--background-modifier-hover);
   color: var(--text-error, #d04848);
+}
+
+/* Inline reply input -------------------------------------------------- */
+
+.csn-reply-input-row {
+  padding: 8px 14px 12px 44px;       /* align under avatar like other messages */
+}
+
+.csn-reply-input {
+  width: 100%;
+  min-height: 40px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.csn-reply-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.csn-reply-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.csn-reply-cancel,
+.csn-reply-save {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.csn-reply-cancel:hover {
+  background: var(--background-modifier-hover);
+}
+
+.csn-reply-save.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.csn-reply-save.mod-cta:hover {
+  background: var(--interactive-accent-hover);
 }
 
 /* Inline draft (new comment) ------------------------------------------ */
@@ -418,9 +569,13 @@
   border-radius: 0 4px 4px 0;
   max-height: 80px;
   overflow-y: auto;
-  white-space: pre-wrap;
   word-break: break-word;
 }
+
+.csn-draft-quote > *:first-child { margin-top: 0; }
+.csn-draft-quote > *:last-child { margin-bottom: 0; }
+.csn-draft-quote p { margin: 0; }
+.csn-draft-quote ul, .csn-draft-quote ol { margin: 4px 0; padding-left: 18px; }
 
 .csn-draft-input {
   width: 100%;
@@ -472,6 +627,117 @@
 
 .csn-draft-save.mod-cta:hover {
   background: var(--interactive-accent-hover);
+}
+
+/* @-mention autocomplete popup --------------------------------------- */
+
+.csn-mention-popup {
+  position: fixed;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 10px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+  pointer-events: none;            /* purely informational; Tab accepts */
+}
+
+.csn-mention-suggestion {
+  font-weight: 600;
+  color: var(--interactive-accent);
+}
+
+.csn-mention-hint {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+}
+
+/* Claudian "thinking" indicator -------------------------------------- */
+
+.csn-thinking-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 10px 44px;       /* aligned under the avatar column */
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.csn-thinking-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  animation: csn-thinking-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes csn-thinking-pulse {
+  0%, 100% { transform: scale(1);   opacity: 0.5; }
+  50%      { transform: scale(1.3); opacity: 1; }
+}
+
+/* Action buttons on Claudian messages -------------------------------- */
+
+.csn-msg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0 30px;              /* indent under avatar */
+}
+
+.csn-msg-action {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.csn-msg-action:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+}
+
+.csn-msg-action.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.csn-msg-action.mod-cta:hover:not(:disabled) {
+  background: var(--interactive-accent-hover);
+}
+
+.csn-msg-action:disabled,
+.csn-msg-action-done {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Flash animation for editor → panel navigation ----------------------- */
+
+@keyframes csn-flash-anim {
+  0%   { background-color: var(--interactive-accent); }
+  20%  { background-color: var(--interactive-accent); }
+  100% { background-color: transparent; }
+}
+
+.csn-comment.csn-flash {
+  animation: csn-flash-anim 1.4s ease-out;
+  border-radius: 4px;
 }
 
 /* Editor highlights ---------------------------------------------------- */
