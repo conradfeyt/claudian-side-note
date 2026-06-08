@@ -1,10 +1,14 @@
 # Claudian SideNote
 
+> ### ⚠️ Dependency notice
+> The **`@claude` AI-reply feature requires a separate companion plugin, [`realclaudian`](#the-claude-feature-needs-realclaudian), which is bespoke and *not publicly released*.** On a normal install that feature will not work.
+> **Everything else — threaded inline comments — works fully standalone.** If you just want inline comments, you're good to go. See [details below](#the-claude-feature-needs-realclaudian).
+
 An [Obsidian](https://obsidian.md) plugin for **threaded inline comments anchored to text** — a [SideNote](https://github.com/cumany/obsidian-side-note)-style review layer with conversation threads, plus an optional **`@claude` workflow** that lets an embedded Claude reply to your comments in place.
 
 Select text → add a comment → reply in a thread. Comments live in the side panel (All / Unresolved / Resolved tabs) with two-way navigation: click a quote to jump to its source, click a highlight to focus its comment.
 
-## ⚠️ Heads-up: the `@claude` feature needs a companion plugin
+## The `@claude` feature needs `realclaudian`
 
 The headline trick — mention `@claude` (or `@claudian`) in a comment and have Claude reply, with **Apply / Resolve / Navigate** actions written back into the thread — depends on a separate, **bespoke** plugin (`realclaudian`, an embedded Claude chat panel) that is **not publicly distributed**.
 
