@@ -31,7 +31,8 @@ const DEFAULT_SETTINGS = {
   commentSortOrder: 'position',
   panelScope: 'current-file',           // 'current-file' | 'all-files'
 
-  conradColor: '#FF8C42',
+  authorName: 'Me',                     // display name for your (human-authored) comments & replies
+  conradColor: '#FF8C42',               // avatar/initial colour for your messages
   claudianColor: '#5DADE2',
 
   schemaVersion: 1,
@@ -90,6 +91,8 @@ class ClaudianSideNote extends obsidian.Plugin {
     this.setupDataJsonWatcher();
 
     this.addRibbonIcon('message-square', 'Open Claudian SideNote panel', () => this.activateView());
+
+    this.addSettingTab(new ClaudianSideNoteSettingTab(this.app, this));
 
     this.addCommand({ id: 'open-panel', name: 'Open panel', callback: () => this.activateView() });
 
@@ -483,12 +486,13 @@ class ClaudianSideNote extends obsidian.Plugin {
   buildClaudianPrompt(comment, mentionFrom) {
     const fileLink = `[[${comment.filePath}]]`;
     const anchor = (comment.selectedText || '').slice(0, 400);
+    const name = this.settings.authorName || 'Me';
     const threadText = (comment.thread || [])
-      .map(m => `> ${m.author === 'claudian' ? 'You (Claudian)' : 'Conrad'}: ${m.text}`)
+      .map(m => `> ${m.author === 'claudian' ? 'You (Claudian)' : name}: ${m.text}`)
       .join('\n');
     const mentionLine = mentionFrom === 'reply'
-      ? `Conrad replied with an @-mention.`
-      : `Conrad created a comment with an @-mention.`;
+      ? `${name} replied with an @-mention.`
+      : `${name} created a comment with an @-mention.`;
 
     return [
       `${mentionLine} On ${fileLink} (comment id \`${comment.id}\`):`,
@@ -498,7 +502,7 @@ class ClaudianSideNote extends obsidian.Plugin {
       `Source position: line ${comment.startLine + 1}, chars ${comment.startChar}-${comment.endChar}.`,
       '',
       'Comment thread:',
-      `> Conrad: ${comment.comment}`,
+      `> ${name}: ${comment.comment}`,
       threadText || null,
       '',
       `Read surrounding context in ${fileLink}, then reply by appending a thread entry to this comment in \`.obsidian/plugins/claudian-side-note/data.json\`. Find the comment with \`"id": "${comment.id}"\` and push onto its \`thread\` array:`,
@@ -701,14 +705,24 @@ class ClaudianSideNote extends obsidian.Plugin {
   }
 
   /**
-   * Dispatch a no-op transaction on every open CodeMirror editor so the
-   * highlight ViewPlugin re-builds decorations from current settings.
+   * Re-sync highlights in every open note after comments/filter change.
+   *  - Live Preview / Source: a no-op transaction makes the highlight
+   *    ViewPlugin rebuild its decorations.
+   *  - Reading mode: the highlight MarkdownPostProcessor only runs when the
+   *    preview re-renders, so it goes STALE on a filter/resolve/delete (the
+   *    highlight stays painted while the comment leaves the panel). Force a
+   *    preview re-render so its highlights recompute against current settings.
    */
   refreshAllEditors() {
     this.app.workspace.iterateAllLeaves((leaf) => {
       const v = leaf && leaf.view;
-      if (v && v.editor && v.editor.cm) {
+      if (!v) return;
+      if (v.editor && v.editor.cm) {
         try { v.editor.cm.dispatch({}); } catch (e) { /* ignore */ }
+      }
+      const preview = v.previewMode;
+      if (preview && typeof preview.rerender === 'function') {
+        try { preview.rerender(true); } catch (e) { /* ignore */ }
       }
     });
   }
@@ -751,9 +765,10 @@ class ClaudianSideNote extends obsidian.Plugin {
         ev.stopPropagation();
         this.focusCommentInPanel(c.id);
       });
+      const authorName = this.settings.authorName || 'Me';
       wrap.title = (c.thread && c.thread.length > 0)
-        ? `Conrad: ${c.comment} (+${c.thread.length} replies)`
-        : `Conrad: ${c.comment}`;
+        ? `${authorName}: ${c.comment} (+${c.thread.length} replies)`
+        : `${authorName}: ${c.comment}`;
       return wrap;
     };
 
@@ -1367,10 +1382,11 @@ class ClaudianSideNoteView extends obsidian.ItemView {
     avatar.style.backgroundColor = msg.author === 'claudian'
       ? this.plugin.settings.claudianColor
       : this.plugin.settings.conradColor;
-    avatar.setText(msg.author === 'claudian' ? 'AI' : 'C');
+    const authorName = this.plugin.settings.authorName || 'Me';
+    avatar.setText(msg.author === 'claudian' ? 'AI' : (authorName.trim().charAt(0).toUpperCase() || 'M'));
 
     const meta = header.createDiv('csn-msg-meta');
-    meta.createSpan({ text: msg.author === 'claudian' ? 'Claudian' : 'Conrad', cls: 'csn-msg-name' });
+    meta.createSpan({ text: msg.author === 'claudian' ? 'Claudian' : authorName, cls: 'csn-msg-name' });
     if (msg.timestamp) {
       meta.createSpan({ text: this.formatRelativeTime(msg.timestamp), cls: 'csn-msg-time' });
     }
@@ -1419,7 +1435,23 @@ class ClaudianSideNoteView extends obsidian.ItemView {
       });
     }
 
-    // Anchor quote (only on first message) — click to jump to the source.
+    // Body — the actual note. Rendered FIRST so the user's comment is always
+    // the prominent content, even when the anchored selection below is long.
+    if (msg.text) {
+      const body = msgEl.createDiv('csn-msg-body');
+      // Render markdown — handles bold/italics/links/lists/blockquotes/code/etc.
+      // `this` is the MarkdownRenderChild lifecycle hook (ItemView extends Component).
+      obsidian.MarkdownRenderer.render(
+        this.app,
+        msg.text,
+        body,
+        parentComment.filePath || '',
+        this
+      );
+    }
+
+    // Anchor quote (only on first message) — the quoted source text, shown as
+    // secondary context *below* the note. Click to jump to the source.
     if (isFirst && parentComment.selectedText) {
       const quote = msgEl.createDiv('csn-anchor-quote');
       // Render the anchor as markdown so bold/italics/links/lists land as HTML.
@@ -1437,20 +1469,6 @@ class ClaudianSideNoteView extends obsidian.ItemView {
         ev.stopPropagation();
         this.plugin.jumpToComment(parentComment);
       });
-    }
-
-    // Body
-    if (msg.text) {
-      const body = msgEl.createDiv('csn-msg-body');
-      // Render markdown — handles bold/italics/links/lists/blockquotes/code/etc.
-      // `this` is the MarkdownRenderChild lifecycle hook (ItemView extends Component).
-      obsidian.MarkdownRenderer.render(
-        this.app,
-        msg.text,
-        body,
-        parentComment.filePath || '',
-        this
-      );
     }
 
     // Action buttons — only on Claudian-authored messages with `actions` array.
@@ -1884,6 +1902,53 @@ function hexToRgba(hex, opacity) {
   const b = parseInt(hex.slice(5, 7), 16);
   const o = opacity != null ? opacity : 0.2;
   return `rgba(${r}, ${g}, ${b}, ${o})`;
+}
+
+class ClaudianSideNoteSettingTab extends obsidian.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl('h3', { text: 'Claudian SideNote' });
+
+    new obsidian.Setting(containerEl)
+      .setName('Your name')
+      .setDesc('Display name shown on your comments and replies (the human side of a thread).')
+      .addText(text => text
+        .setPlaceholder('Me')
+        .setValue(this.plugin.settings.authorName)
+        .onChange(async (value) => {
+          this.plugin.settings.authorName = value.trim() || 'Me';
+          await this.plugin.saveSettings();
+          this.plugin.refreshAllViews();
+        }));
+
+    new obsidian.Setting(containerEl)
+      .setName('Your colour')
+      .setDesc('Avatar colour for your messages.')
+      .addColorPicker(cp => cp
+        .setValue(this.plugin.settings.conradColor)
+        .onChange(async (value) => {
+          this.plugin.settings.conradColor = value;
+          await this.plugin.saveSettings();
+          this.plugin.refreshAllViews();
+        }));
+
+    new obsidian.Setting(containerEl)
+      .setName("Claudian's colour")
+      .setDesc('Avatar colour for AI (Claudian) messages.')
+      .addColorPicker(cp => cp
+        .setValue(this.plugin.settings.claudianColor)
+        .onChange(async (value) => {
+          this.plugin.settings.claudianColor = value;
+          await this.plugin.saveSettings();
+          this.plugin.refreshAllViews();
+        }));
+  }
 }
 
 module.exports = ClaudianSideNote;

@@ -33,7 +33,7 @@ Comments are stored in `data.json` inside the plugin folder (schema: id, file pa
 
 ## Known limitations
 
-- The comment author is currently hardcoded as **"Conrad"** in a few UI strings — not yet a setting. PRs welcome.
+- **Comments can only be _created_ in Live Preview or Source mode — not Reading mode.** Existing comment highlights still *render* in Reading mode, but you can't select text and add a new comment there yet (the DOM-selection → source-position mapping isn't built).
 - `@claude` replies require the unreleased `realclaudian` plugin (see above).
 - Re-anchoring as files change is still rough; editing a highlighted span can orphan a comment.
 
